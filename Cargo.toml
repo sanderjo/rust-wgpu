@@ -1,0 +1,12 @@
+[package]
+name = "wgpu_vs_cpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "22"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
