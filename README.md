@@ -2,12 +2,14 @@
 
 A small Rust example that:
 
-1. Detects whatever GPU backends [wgpu](https://github.com/gfx-rs/wgpu) can find on the
-   system (Vulkan / Metal / DX12 / GL) and prints each adapter it discovers.
-2. Runs a compute-heavy elementwise math kernel on the GPU via a WGSL compute shader.
-3. Runs the identical kernel single-threaded on the CPU.
-4. Compares wall-clock time (the GPU timing includes buffer upload, dispatch, and
-   readback, since that's the real cost in practice) and reports which was faster.
+1. Detects and prints the CPU model and whatever GPU backends
+   [wgpu](https://github.com/gfx-rs/wgpu) can find on the system
+   (Vulkan / Metal / DX12 / GL).
+2. Runs a compute-heavy elementwise math kernel on the CPU single-threaded, then again
+   split across all logical cores, then on the GPU via a WGSL compute shader.
+3. Compares wall-clock time across all three (the GPU timing includes buffer upload,
+   dispatch, and readback, since that's the real cost in practice) and reports the
+   speedup/slowdown between each pair.
 
 ## Requirements
 
@@ -48,6 +50,7 @@ Two constants at the top of `src/main.rs` control the benchmark size:
 ```
 === wgpu vs CPU benchmark ===
 
+CPU: 11th Gen Intel(R) Core(TM) i3-1115G4 @ 3.00GHz (4 logical cores, arch=x86_64)
 Scanning for wgpu-compatible adapters...
   Found: Intel(R) UHD Graphics (TGL GT2) | backend=Vulkan | type=IntegratedGpu | driver=Intel open-source Mesa driver
   Found: llvmpipe (LLVM 20.1.2, 256 bits) | backend=Vulkan | type=Cpu | driver=llvmpipe
@@ -58,13 +61,19 @@ Using adapter: Intel(R) UHD Graphics (TGL GT2) (backend=Vulkan, type=IntegratedG
 Workload: 4194304 elements, 60 kernel iterations each
 
 Running CPU (single-threaded)...
-  CPU time: 10.331967 s
+  CPU (1 thread) time: 10.458695 s (lower is better)
+
+Running CPU (4 threads)...
+  CPU (4 threads) time: 3.683740 s (lower is better)
+  Max abs difference vs single-threaded CPU: 0.000000
 
 Running GPU (upload + compute + download)...
-  GPU time: 0.153625 s
+  GPU time: 0.133207 s (lower is better)
 
 Max abs difference between CPU and GPU results: 0.000000
 
 === Result ===
-wgpu (GPU) was faster: 67.25x speedup over CPU.
+CPU (4 threads) was faster than CPU (1 thread): 2.84x speedup.
+GPU was faster than CPU (1 thread): 78.51x speedup.
+GPU was faster than CPU (4 threads): 27.65x speedup.
 ```

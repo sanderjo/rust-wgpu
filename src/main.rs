@@ -56,17 +56,57 @@ fn cpu_kernel(mut y: f32, iterations: u32) -> f32 {
 }
 
 fn fmt_secs(d: std::time::Duration) -> String {
-    format!("{:.6} s", d.as_secs_f64())
+    format!("{:.6} s (lower is better)", d.as_secs_f64())
+}
+
+/// Reads the CPU model name from /proc/cpuinfo (Linux). Falls back to just
+/// the architecture if that's not available (e.g. non-Linux, or sandboxed).
+fn cpu_model_name() -> String {
+    if let Ok(content) = std::fs::read_to_string("/proc/cpuinfo") {
+        for line in content.lines() {
+            if let Some((key, val)) = line.split_once(':') {
+                if key.trim() == "model name" {
+                    return val.trim().to_string();
+                }
+            }
+        }
+    }
+    format!("unknown ({} architecture)", std::env::consts::ARCH)
 }
 
 fn make_input(n: usize) -> Vec<f32> {
     (0..n).map(|i| (i as f32 * 0.000_001).fract() + 0.1).collect()
 }
 
-fn run_cpu(input: &[f32], iterations: u32) -> (Vec<f32>, std::time::Duration) {
+fn run_cpu_single_threaded(input: &[f32], iterations: u32) -> (Vec<f32>, std::time::Duration) {
     let start = Instant::now();
     let out: Vec<f32> = input.iter().map(|&x| cpu_kernel(x, iterations)).collect();
     (out, start.elapsed())
+}
+
+/// Same kernel, split evenly across all available logical cores.
+fn run_cpu_multi_threaded(
+    input: &[f32],
+    iterations: u32,
+    num_threads: usize,
+) -> (Vec<f32>, std::time::Duration) {
+    let mut output = vec![0.0f32; input.len()];
+    let chunk_size = input.len().div_ceil(num_threads).max(1);
+
+    let start = Instant::now();
+    std::thread::scope(|scope| {
+        for (in_chunk, out_chunk) in input
+            .chunks(chunk_size)
+            .zip(output.chunks_mut(chunk_size))
+        {
+            scope.spawn(move || {
+                for (o, &x) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                    *o = cpu_kernel(x, iterations);
+                }
+            });
+        }
+    });
+    (output, start.elapsed())
 }
 
 struct GpuContext {
@@ -234,6 +274,16 @@ fn run_gpu(ctx: &GpuContext, input: &[f32], iterations: u32) -> (Vec<f32>, std::
 fn main() {
     println!("=== wgpu vs CPU benchmark ===\n");
 
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    println!(
+        "CPU: {} ({} logical cores, arch={})",
+        cpu_model_name(),
+        cores,
+        std::env::consts::ARCH
+    );
+
     let gpu = init_gpu();
     match &gpu {
         Some(ctx) => {
@@ -256,10 +306,18 @@ fn main() {
     let input = make_input(ELEMENT_COUNT);
 
     println!("Running CPU (single-threaded)...");
-    let (cpu_out, cpu_time) = run_cpu(&input, ITERATIONS);
-    println!("  CPU time: {}", fmt_secs(cpu_time));
+    let (cpu1_out, cpu1_time) = run_cpu_single_threaded(&input, ITERATIONS);
+    println!("  CPU (1 thread) time: {}", fmt_secs(cpu1_time));
+
+    println!("\nRunning CPU ({} threads)...", cores);
+    let (cpun_out, cpun_time) = run_cpu_multi_threaded(&input, ITERATIONS, cores);
+    println!("  CPU ({} threads) time: {}", cores, fmt_secs(cpun_time));
+    let cpu_multi_diff = max_abs_diff(&cpu1_out, &cpun_out);
+    println!("  Max abs difference vs single-threaded CPU: {:.6}", cpu_multi_diff);
 
     let Some(ctx) = gpu else {
+        println!("\n=== Result ===");
+        print_comparison("CPU (1 thread)", cpu1_time, &format!("CPU ({} threads)", cores), cpun_time);
         println!("\nNo GPU to compare against. Done.");
         return;
     };
@@ -269,26 +327,33 @@ fn main() {
     println!("  GPU time: {}", fmt_secs(gpu_time));
 
     // Sanity-check correctness: GPU f32 math shouldn't drift far from CPU.
-    let max_diff = cpu_out
-        .iter()
-        .zip(gpu_out.iter())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f32, f32::max);
-    println!("\nMax abs difference between CPU and GPU results: {:.6}", max_diff);
-    if max_diff > 1e-2 {
+    let gpu_diff = max_abs_diff(&cpu1_out, &gpu_out);
+    println!("\nMax abs difference between CPU and GPU results: {:.6}", gpu_diff);
+    if gpu_diff > 1e-2 {
         println!("  Warning: results diverge more than expected; treat timings with caution.");
     }
 
     println!("\n=== Result ===");
-    if gpu_time < cpu_time {
-        let speedup = cpu_time.as_secs_f64() / gpu_time.as_secs_f64();
-        println!("wgpu (GPU) was faster: {:.2}x speedup over CPU.", speedup);
+    print_comparison("CPU (1 thread)", cpu1_time, &format!("CPU ({} threads)", cores), cpun_time);
+    print_comparison("CPU (1 thread)", cpu1_time, "GPU", gpu_time);
+    print_comparison(&format!("CPU ({} threads)", cores), cpun_time, "GPU", gpu_time);
+}
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// Prints how `to_time` compares against `from_time`, e.g. "GPU was faster
+/// than CPU (1 thread): 78.07x speedup."
+fn print_comparison(from_label: &str, from_time: std::time::Duration, to_label: &str, to_time: std::time::Duration) {
+    if to_time < from_time {
+        let speedup = from_time.as_secs_f64() / to_time.as_secs_f64();
+        println!("{} was faster than {}: {:.2}x speedup.", to_label, from_label, speedup);
     } else {
-        let slowdown = gpu_time.as_secs_f64() / cpu_time.as_secs_f64();
-        println!(
-            "wgpu (GPU) was SLOWER than plain CPU: {:.2}x slower. \
-             (Likely due to transfer overhead or a workload too small/light to beat the CPU.)",
-            slowdown
-        );
+        let slowdown = to_time.as_secs_f64() / from_time.as_secs_f64();
+        println!("{} was SLOWER than {}: {:.2}x slower.", to_label, from_label, slowdown);
     }
 }
