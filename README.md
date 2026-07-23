@@ -77,3 +77,33 @@ CPU (4 threads) was faster than CPU (1 thread): 2.84x speedup.
 GPU was faster than CPU (1 thread): 78.51x speedup.
 GPU was faster than CPU (4 threads): 27.65x speedup.
 ```
+
+## When is wgpu (GPU) actually faster than CPU?
+
+GPU compute wins when a workload is **massively parallel, arithmetic-heavy, and large
+enough to amortize fixed overhead**. The traits that make a workload GPU-friendly:
+
+1. **High arithmetic intensity** — lots of FLOPs per byte moved. Memory-bound work
+   (e.g. one add per byte) doesn't leave the GPU anything to hide its transfer cost
+   behind.
+2. **Data parallelism with no cross-element dependencies** — thousands of GPU cores
+   only pay off if the work splits into independent lanes.
+3. **Uniform control flow** — GPUs execute in lockstep groups (warps/wavefronts);
+   heavy per-element branching stalls parallelism.
+4. **Enough total work to amortize fixed cost** — every dispatch pays for shader
+   compilation, buffer upload, and readback, which is milliseconds of overhead
+   regardless of workload size.
+
+The benchmark above hits all four: 4M independent floats, each doing hundreds of
+trig/sqrt ops with no dependency on any other element — hence the ~78x speedup.
+
+The flip side — where GPU compute is a poor fit — is small, sequential, or
+memory-bound work: parsing/decoding text formats, variable-length or
+escape-sequence-based formats (where each byte's position depends on the bytes before
+it), or any one-off computation too small to amortize the dispatch/upload/readback
+overhead. There, a plain CPU loop (ideally with SIMD) usually wins, sometimes by two or
+three orders of magnitude.
+
+Rule of thumb: GPU shines on big, parallel, compute-dense workloads (image/video
+processing, ML inference/training, physics simulations, hashing at scale, ray
+tracing); it's a poor fit for small, sequential, or memory-bound tasks.
